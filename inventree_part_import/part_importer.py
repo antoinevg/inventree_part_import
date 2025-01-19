@@ -100,6 +100,9 @@ class PartImporter:
                 if self.verbose:
                     error(traceback.format_exc(), prefix="FULL TRACEBACK:\n")
 
+                # Please carry on!
+                return ImportResult.FAILURE
+
             if import_result == ImportResult.ERROR:
                 # let the other api calls finish
                 for _, other_results in search_results:
