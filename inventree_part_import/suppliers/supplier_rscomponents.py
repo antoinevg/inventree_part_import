@@ -1,4 +1,4 @@
-import os
+import os, sys, traceback
 import pickle
 
 from types import MethodType
@@ -42,7 +42,7 @@ class RSComponents(Supplier):
             print(f"Retrieving search: '{search_term}'")
             if not (result := scrape(url, fallback_domains=FALLBACK_DOMAINS)):
                 warning(f"Failed to cache '{search_term}' from '{url}' (blocked?)")
-                return True
+                return [], 0
             # pickle result
             with open(filename, "wb") as f:
                 pickle.dump(result, f)
@@ -52,29 +52,86 @@ class RSComponents(Supplier):
 
         # check if we went straight to the product page or have a result table
         results_table = soup.select("div[data-testid='product-tile-item']")
-        if len(results_table) == 0:
+        if len(results_table) == 0: # straight to product page?
             # e.g. inventree-part-import 136-1275
-            matches = scrape_product_page(result, soup)
+            matches = [scrape_product_page(result, soup, search_term)]
         else:
             # e.g. inventree-part-import ERJ-2RKF1002X
             matches = scrape_search_results(result, soup)
 
+        #for index, rs_part in enumerate(matches):
+        #    print(f"  {index} => {rs_part.get('Mfr. Part No.')}")
+
         # filter results
-        search_term_norm = search_term.lower().replace('-', '')
-        exact_matches = [
+        search_term_lower = search_term.lower()
+        search_term_norm  = search_term_lower.replace('-', '')
+        mpn_lower = lambda rs_part: rs_part.get("Mfr. Part No.", "").lower()
+        sku_norm  = lambda rs_part: rs_part.get("RS stock no.", "").lower().replace('-', '')
+
+        filtered_matches = [
             rs_part for rs_part in matches
-            if rs_part.get("RS stock no.", "").lower().replace('-', '').startswith(search_term_norm)
-            or rs_part.get("Mfr. Part No.", "").lower().replace('-', '').startswith(search_term_norm)
+            if sku_norm(rs_part).startswith(search_term_norm)
+            or mpn_lower(rs_part).startswith(search_term_lower)
         ]
+        exact_matches = [
+            rs_part for rs_part in filtered_matches
+            if sku_norm(rs_part)  == search_term_norm or
+               mpn_lower(rs_part) == search_term_lower
+        ]
+        def get_dupes(rs_parts):
+            from collections import defaultdict
+            dupes = defaultdict(list)
+            for rs_part in rs_parts:
+                dupes[mpn_lower(rs_part)].append(rs_part)
+            print("counts: ", [k for k,v in dupes.items()])
+            dupes = { k:v for k,v in dupes.items() if len(v) > 1 }
+            return dupes
+        identical_matches = get_dupes(filtered_matches)
 
-        print(f"Got {len(matches)} results, filtered down to {len(matches)} results")
+        print(f"Got {len(matches)} results:")
+        print(f"    {len(filtered_matches)} filtered matches")
+        print(f"    {len(identical_matches)} identical matches")
+        print(f"    {len(exact_matches)} exact matches")
 
-        # return exact matches, if we have them
-        if len(exact_matches) > 0:
-            return list(map(self.get_api_part, exact_matches)), len(exact_matches)
+        # return exact match, if we have one
+        if len(exact_matches) == 1:
+            print(f"HAVE AN EXACT MATCH: {exact_matches}")
+            return [self.get_api_part(exact_matches[0])], 1
 
-        # return all matches
-        return list(map(self.get_api_part, matches)), len(matches)
+        # if we have matches with identical mpn's, first merge their price break data
+        if len(identical_matches) > 0:
+            print(f"HAVE IDENTICAL MATCHES: {len(identical_matches)}")
+
+            def merge(rs_parts):
+                # get price break data
+                api_parts = list(map(self.get_api_part, rs_parts))
+                lowest_qty_value = 10000
+                lowest_qty_index = None
+                price_breaks = {}
+                for index, api_part in enumerate(api_parts):
+                    price_break = api_part.price_breaks
+                    #print(f"  #{index} => {price_break}")
+                    for qty, price in price_break.items():
+                        qty = int(first(qty.split(' ', 1), lowest_qty_value))
+                        if qty < lowest_qty_value:
+                            lowest_qty_index = index
+                            lowest_qty_value = qty
+                    price_breaks |= price_break
+                api_part = api_parts[lowest_qty_index]
+                api_part.price_breaks = price_breaks
+                print(f"AUTO SELECTED: #{lowest_qty_index} => {api_part}")
+                return api_part
+
+            api_parts = [merge(rs_parts) for mpn, rs_parts in identical_matches.items()]
+            #for index, api_part in enumerate(api_parts):
+            #    print(f"#{index} => {api_part}")
+            return api_parts, len(api_parts)
+            #sys.exit(0)
+            #return [rs_part], 1
+
+        # otherwise, return filtered matches
+        return list(map(self.get_api_part, filtered_matches)), len(filtered_matches)
+
 
 
     def get_api_part(self, rs_part):
@@ -97,7 +154,7 @@ class RSComponents(Supplier):
                 print(f"Retrieving RSComponents SKU: '{rs_sku}'")
                 if not (result := scrape(rs_url, fallback_domains=FALLBACK_DOMAINS)):
                     warning(f"Failed to cache '{rs_sku}' from '{rs_url}' (blocked?)")
-                    return True
+                    return None
                 # pickle result
                 with open(filename, "wb") as f:
                     pickle.dump(result, f)
@@ -106,7 +163,7 @@ class RSComponents(Supplier):
             soup = BeautifulSoup(result.content, "html.parser")
 
             # scrape search results and update rs_part
-            rs_part |= first(scrape_product_page(result, soup), rs_part)
+            rs_part |= scrape_product_page(result, soup)
 
         # debug
         print(f"Importing: {rs_part.get('Mfr. Part No.')} ({rs_part.get('RS stock no.')})")
@@ -124,9 +181,6 @@ class RSComponents(Supplier):
             qty = qty.split(' ', 1)[0]
             price = money2float(price)
             price_breaks[qty] = price
-        print(f"PRICE BREAKS:")
-        for qty, price in price_breaks.items():
-            print(f"  {qty} : {price}")
 
         rs_stock_no = rs_part.get("RS stock no.")
         api_part = ApiPart(
@@ -157,7 +211,7 @@ class RSComponents(Supplier):
 
 # - scrape product page -------------------------------------------------------
 
-def scrape_product_page(result, soup):
+def scrape_product_page(result, soup, search_term=None):
     # TODO: brand-logo is data-testid='brand-logo'
 
     rs_part = {}
@@ -166,16 +220,25 @@ def scrape_product_page(result, soup):
         #  RS stock no.      - key-details
         #  Mfr. Part No.     - key-details
         #  Manufacturer      - key-details
-        key_details = first(soup.select("dl[data-testid='key-details-desktop']"))
+        key_details = soup.select_one("dl[data-testid='key-details-desktop']")
+        if not key_details:
+            warning(f"Failed to parse product page key details: {key_details}")
+            return {}
         details = map(lambda column: column.text.strip().strip(":"), key_details.children)
         details = dict(zip(details, details))
+        print(f"DETAILS: {details}")
+        # fix details if needed
+        try:
+            details["RS stock no."] = details.pop("RS Stock No.")
+        except:
+            print(f"DETAILS: {details}")
         rs_part |= details
 
         # RS Part:
         #  Description       - long-description
         #  ProductDetailUrl  - result.url
         #  ImagePath         - gallery-content / https://media.rs-online.com/image/upload/R{rs_sku}-01
-        description = first(soup.select("div[data-testid='long-description']"))
+        description = soup.select_one("div[data-testid='long-description']")
         product_detail_url = first(result.url.split('?', 1))
         rs_sku = details["RS stock no."]
         rs_sku_nodash = rs_sku.replace('-', '')
@@ -198,23 +261,25 @@ def scrape_product_page(result, soup):
 
         # RS Part:
         #  ProductAttributes - specification-attributes
-        specification_attributes = first(soup.select("table[data-testid='specification-attributes']"))
-        attributes = dict(
-            tuple(
-                map(
-                    lambda column: column.text.strip().strip(":"),
-                    row.find_all("td")[:2]
+        specification_attributes = soup.select_one("table[data-testid='specification-attributes']")
+        attributes = {}
+        if specification_attributes:
+            attributes = dict(
+                tuple(
+                    map(
+                        lambda column: column.text.strip().strip(":"),
+                        row.find_all("td")[:2]
+                    )
                 )
+                for row in specification_attributes.find_all("tr")[1:]
             )
-            for row in specification_attributes.find_all("tr")[1:]
-        )
         rs_part |= { "ProductAttributes": attributes }
 
         # RS Part:
         #  PriceBreaks       - price-breaks
         #  Packaging         - price-breaks.header[2]
         #  Currency          - price-breaks.value.text[0]
-        price_breaks = first(soup.select("table[data-testid='price-breaks']"))
+        price_breaks = soup.select_one("table[data-testid='price-breaks']")
         rs_price_breaks = dict(
             tuple(
                 map(
@@ -236,6 +301,7 @@ def scrape_product_page(result, soup):
             "R": "ZAR",
             "€": "EUR",
             "$": "USD",
+            "£": "GBP",
         }
         rs_currency = None
         qty, price = next(iter(rs_price_breaks.items()))
@@ -252,18 +318,20 @@ def scrape_product_page(result, soup):
         # RS Part:
         #  AvailabilityInStock - stock-status-0
         stock_status_0 = soup.select_one("div[data-testid='stock-status-0']")
-        qty = first(stock_status_0.text.split(' '), 0)
-        qty = float(qty) if qty.isnumeric() else 0.
-        rs_part |= {
-            "AvailabilityInStock": qty,
-        }
+        if stock_status_0:
+            qty = first(stock_status_0.text.split(' '), 0)
+            qty = float(qty) if qty.isnumeric() else 0.
+            rs_part |= {
+                "AvailabilityInStock": qty,
+            }
 
         # RS Part:
         #  DataSheetUrl - technical-documents
         technical_documents = soup.select_one("ul[data-testid='technical-documents'] li a")
-        rs_part |= {
-            "DataSheetUrl": technical_documents.get("href", "")
-        }
+        if technical_documents:
+            rs_part |= {
+                "DataSheetUrl": technical_documents.get("href", "")
+            }
 
         # RS Part:
         #  Category - breadcrumb-container
@@ -274,35 +342,44 @@ def scrape_product_page(result, soup):
             "CategoryPath": category_path,
         }
 
-        return [rs_part]
+        return rs_part
 
     except Exception as e:
         warning(f"Failed to parse product page: {e}")
-        return []
+        warning(traceback.format_exc())
+        raise e
+        #sys.exit(0)
+        #return rs_part # TODO {} ?
 
 
 # - scrape search results -----------------------------------------------------
 
 def scrape_search_results(result, soup):
-    results_table = first(soup.select("div[data-testid='product-tile-item']"))
+    results_table = soup.select("div[data-testid='product-tile-item']")
 
     results = []
     for index, entry in enumerate(results_table):
         try:
-            product_tile_container  = first(entry.select("a[data-qa='product-tile-container']"))
-            product_tile_title      = first(entry.select("div[data-qa='product-tile-title']"))
-            product_tile_partno     = first(entry.select("div[data-qa='product-tile-partno-value']"))
-            product_tile_mftr       = first(entry.select("div[data-qa='product-tile-mftr-value']"))
-            product_tile_price      = first(entry.select("div[data-qa='product-tile-price']"))
-            product_tile_price_unit = first(entry.select("div[data-qa='product-tile-price-unit']"))
+            product_tile_container  = entry.select_one("a[data-qa='product-tile-container']")
+            product_tile_title      = entry.select_one("div[data-qa='product-tile-title']")
+            product_tile_partno     = entry.select_one("div[data-qa='product-tile-partno-value']")
+            product_tile_mftr       = entry.select_one("div[data-qa='product-tile-mftr-value']")
+            product_tile_price      = entry.select_one("div[data-qa='product-tile-price']")
+            product_tile_price_unit = entry.select_one("div[data-qa='product-tile-price-unit']")
 
-            product_url  = first(product_tile_container.get("href", "").split('?', 1))
-            partno_rs    = product_tile_partno.text.strip()
-            partno_mftr  = product_tile_mftr.text.strip()
-            description  = product_tile_title.text.strip()
-            manufacturer = first(description.split(' ', 1)).strip()
-            price        = product_tile_price.text.strip()
-            price_unit   = product_tile_price_unit.text.strip()
+            if product_tile_container:
+                product_url  = first(product_tile_container.get("href", "").split('?', 1))
+            if product_tile_partno:
+                partno_rs    = product_tile_partno.text.strip()
+            if product_tile_mftr:
+                partno_mftr  = product_tile_mftr.text.strip()
+            if product_tile_title:
+                description  = product_tile_title.text.strip()
+                manufacturer = first(description.split(' ', 1)).strip()
+            if  product_tile_price:
+                price        = product_tile_price.text.strip()
+            if product_tile_price_unit:
+                price_unit   = product_tile_price_unit.text.strip()
 
             # RS Part:
             #  RS stock no.     - product-tile-partno
@@ -318,8 +395,12 @@ def scrape_search_results(result, soup):
                 "ProductDetailUrl": product_url,
             }
             results.append(rs_part)
-        except:
-            continue
+        except Exception as e:
+            warning(f"Failed to parse search page: {e}")
+            warning(traceback.format_exc())
+            raise e
+            #sys.exit(0)
+            #return rs_part # TODO {} ?
 
     return results
 
