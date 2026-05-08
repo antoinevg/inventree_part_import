@@ -12,7 +12,7 @@ from .scrape import DOMAIN_REGEX, DOMAIN_SUB, REMOVE_HTML_TAGS, scrape
 class Mouser(Supplier):
     SUPPORT_LEVEL = SupplierSupportLevel.SCRAPING
 
-    def setup(self, api_key, currency, scraping, locale_url="www.mouser.com"):
+    def setup(self, api_key, currency, scraping, locale_url="www.mouser.co.za"):
         os.environ["MOUSER_PART_API_KEY"] = api_key
 
         self.currency = currency
@@ -135,6 +135,6 @@ class Mouser(Supplier):
         return True
 
 FALLBACK_DOMAINS = (
-    "www2.mouser.com",
-    "eu.mouser.com",
+#    "www2.mouser.com",
+#    "eu.mouser.com",
 )

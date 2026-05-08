@@ -61,13 +61,20 @@ class PartImporter:
         search_results = search(search_term, supplier_id, only_supplier)
         for supplier, async_results in search_results:
             info(f"searching at {supplier.name} ...")
-            results, result_count = async_results.get()
-
+            results = async_results.get()
             if not results:
                 hint(f"no results at {supplier.name}")
                 continue
 
-            if len(results) == 1:
+            print(f"RESULTS:{results}")
+
+            results, result_count = results
+            print(f"RESULTS:{results} RESULT_COUNT:{result_count}")
+
+            if len(results) == 0:
+                warning(f"found {result_count} parts at {supplier.name}, skipping import")
+                continue
+            elif len(results) == 1:
                 api_part = results[0]
             elif self.interactive:
                 prompt(f"found multiple parts at {supplier.name}, select which one to import")

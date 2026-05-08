@@ -54,10 +54,19 @@ class RSComponents(Supplier):
         results_table = soup.select("div[data-testid='product-tile-item']")
         if len(results_table) == 0: # straight to product page?
             # e.g. inventree-part-import 136-1275
-            matches = [scrape_product_page(result, soup, search_term)]
+            match = scrape_product_page(result, soup, search_term)
+            if match is None:
+                matches = []
+            else:
+                matches = [match]
         else:
             # e.g. inventree-part-import ERJ-2RKF1002X
             matches = scrape_search_results(result, soup)
+
+        print(f"GOT MATCHES: {matches}")
+        if len(matches) == 0:
+            print(f"No matches for: {search_term}")
+            return None
 
         #for index, rs_part in enumerate(matches):
         #    print(f"  {index} => {rs_part.get('Mfr. Part No.')}")
@@ -280,22 +289,28 @@ def scrape_product_page(result, soup, search_term=None):
         #  Packaging         - price-breaks.header[2]
         #  Currency          - price-breaks.value.text[0]
         price_breaks = soup.select_one("table[data-testid='price-breaks']")
-        rs_price_breaks = dict(
-            tuple(
-                map(
-                    lambda column: column.text.strip().replace('+', '').strip(),
-                    row.find_all("td")[:2]
+        rs_price_breaks = {}
+        packaging = ""
+        if price_breaks is not None:
+            try:
+                rs_price_breaks = dict(
+                    tuple(
+                        map(
+                            lambda column: column.text.strip().replace('+', '').strip(),
+                            row.find_all("td")[:2]
+                        )
+                    )
+                    for row in price_breaks.find_all("tr")[1:]
                 )
-            )
-            for row in price_breaks.find_all("tr")[1:]
-        )
+            except:
+                warning("No price breaks found. Product may be discontinued")
 
-        packaging = price_breaks.find("tr").find_all("th")
-        if len(packaging) >= 3:
-            packaging = packaging[2].find("div").text.split(" ")[-1]
-            packaging = packaging.replace('*', '')
-        else:
-            packaging = ""
+            packaging = price_breaks.find("tr").find_all("th")
+            if len(packaging) >= 3:
+                packaging = packaging[2].find("div").text.split(" ")[-1]
+                packaging = packaging.replace('*', '')
+            else:
+                packaging = ""
 
         currency_map = {
             "R": "ZAR",
@@ -303,11 +318,14 @@ def scrape_product_page(result, soup, search_term=None):
             "$": "USD",
             "£": "GBP",
         }
-        rs_currency = None
-        qty, price = next(iter(rs_price_breaks.items()))
-        if price:
-            rs_currency = first([c for c in price if not c.isnumeric()])
-            rs_currency = currency_map[rs_currency]
+        rs_currency = "ZAR"
+        try:
+            qty, price = next(iter(rs_price_breaks.items()))
+            if price:
+                rs_currency = first([c for c in price if not c.isnumeric()])
+                rs_currency = currency_map[rs_currency]
+        except:
+            pass
 
         rs_part |= {
             "PriceBreaks": rs_price_breaks,
@@ -347,26 +365,48 @@ def scrape_product_page(result, soup, search_term=None):
     except Exception as e:
         warning(f"Failed to parse product page: {e}")
         warning(traceback.format_exc())
-        raise e
-        #sys.exit(0)
-        #return rs_part # TODO {} ?
+        return None
 
 
 # - scrape search results -----------------------------------------------------
 
 def scrape_search_results(result, soup):
     results_table = soup.select("div[data-testid='product-tile-item']")
+    if results_table is None:
+        warning(f"Failed to parse: {result}")
+        return []
 
     results = []
     for index, entry in enumerate(results_table):
         try:
-            product_tile_container  = entry.select_one("a[data-qa='product-tile-container']")
-            product_tile_title      = entry.select_one("div[data-qa='product-tile-title']")
-            product_tile_partno     = entry.select_one("div[data-qa='product-tile-partno-value']")
-            product_tile_mftr       = entry.select_one("div[data-qa='product-tile-mftr-value']")
-            product_tile_price      = entry.select_one("div[data-qa='product-tile-price']")
-            product_tile_price_unit = entry.select_one("div[data-qa='product-tile-price-unit']")
+            product_tile_container  = entry.select_one("div[data-testid='product-tile-container']")
+            if product_tile_container is None:
+                warning(f"Failed to obtain product_tile_container: {result}")
+                return []
+            product_tile_title      = entry.select_one("div[data-testid='product-tile-title']")
+            if product_tile_title is None:
+                warning(f"Failed to obtain product_tile_title: {result}")
+                return []
+            product_tile_partno     = entry.select_one("div[data-testid='product-tile-partno-value']")
+            if product_tile_partno is None:
+                warning(f"Failed to obtain product_tile_partno: {result}")
+                return []
+            product_tile_mftr       = entry.select_one("div[data-testid='product-tile-mftr-value']")
+            if product_tile_mftr is None:
+                warning(f"Failed to obtain product_tile_mftr: {result}")
+                return []
+            product_tile_price      = entry.select_one("div[data-testid='product-tile-price']")
+            if product_tile_price is None:
+                warning(f"Failed to obtain product_tile_price: {result}")
+                return []
+            product_tile_price_unit = entry.select_one("div[data-testid='product-tile-price-unit']")
+            if product_tile_price_unit is None:
+                warning(f"Failed to obtain product_tile_price_unit: {result}")
+                return []
 
+            product_url = None
+            partno_rs   = None
+            partno_mftr = None
             if product_tile_container:
                 product_url  = first(product_tile_container.get("href", "").split('?', 1))
             if product_tile_partno:
@@ -389,7 +429,7 @@ def scrape_search_results(result, soup):
             #  ProductDetailUrl - product-tile-container.href
             rs_part = {
                 "RS stock no.":     partno_rs,
-                "Mfr. Part No.":    partno_mftr,
+                "Mfr. Part No.":    partno_mftr or partno_rs,
                 "Manufacturer":     manufacturer,
                 "Description":      description,
                 "ProductDetailUrl": product_url,
