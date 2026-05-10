@@ -10,3 +10,7 @@ Pipfile.lock
 dist/
 tests/data/
 tests/test_config/
+
+*~
+*.pkl
+parts.txt

@@ -342,8 +342,16 @@ class PartImporter:
                     "price": price,
                     "price_currency": api_part.currency,
                 }
-                if not SupplierPriceBreak.create(self.api, price_break_data):
-                    raise InvenTreeObjectCreationError(SupplierPriceBreak)
+                try:
+                    if not SupplierPriceBreak.create(self.api, price_break_data):
+                        # This is never reached because .create throws an exception!
+                        raise InvenTreeObjectCreationError(SupplierPriceBreak)
+                except:
+                    # Just skip it in this instance
+                    warning("The pricebreak fields part, quantity must make a unique set:");
+                    warning(f"    {api_part.MPN} - {api_part.description}");
+                    warning(f"    {api_part.price_breaks}");
+                    break
 
     def setup_parameters(self, part: Part, api_part: ApiPart, update_existing: bool = True):
         import_result = ImportResult.SUCCESS

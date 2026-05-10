@@ -36,6 +36,9 @@ dependencies = [
 [project.urls]
 Homepage = "https://github.com/30350n/inventree_part_import"
 
+[project.scripts]
+inventree-part-import = "inventree_part_import.cli:inventree_part_import"
+
 [dependency-groups]
 dev = ["basedpyright", "pytest", "ruff"]
 
